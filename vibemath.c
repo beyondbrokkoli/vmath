@@ -259,11 +259,11 @@ EXPORT void vmath_process_triangles(
     __m256 v_sun_x = _mm256_set1_ps(sun_x);
     __m256 v_sun_y = _mm256_set1_ps(sun_y);
     __m256 v_sun_z = _mm256_set1_ps(sun_z);
-    
+
     __m256 v_rx = _mm256_set1_ps(rx), v_ry = _mm256_set1_ps(ry), v_rz = _mm256_set1_ps(rz);
     __m256 v_ux = _mm256_set1_ps(ux), v_uy = _mm256_set1_ps(uy), v_uz = _mm256_set1_ps(uz);
     __m256 v_fx = _mm256_set1_ps(fx), v_fy = _mm256_set1_ps(fy), v_fz = _mm256_set1_ps(fz);
-    
+
     __m256 v_0_2 = _mm256_set1_ps(0.2f);
     __m256 v_1_0 = _mm256_set1_ps(1.0f);
     __m256i v_alpha_mask = _mm256_set1_epi32(0xFF000000);
@@ -351,7 +351,7 @@ EXPORT void vmath_process_triangles(
         __m256 len_sq = _mm256_fmadd_ps(wnz, wnz, _mm256_fmadd_ps(wny, wny, _mm256_mul_ps(wnx, wnx)));
         len_sq = _mm256_max_ps(len_sq, _mm256_set1_ps(0.000001f)); // Prevent Inf
         __m256 inv_len = _mm256_rsqrt_ps(len_sq);
-        
+
         wnx = _mm256_mul_ps(wnx, inv_len);
         wny = _mm256_mul_ps(wny, inv_len);
         wnz = _mm256_mul_ps(wnz, inv_len);
@@ -362,7 +362,7 @@ EXPORT void vmath_process_triangles(
 
         // 10. Color Decompression & Multiplication
         __m256i orig_col = _mm256_loadu_si256((__m256i*)&baked_color[i]);
-        
+
         __m256i r_i = _mm256_and_si256(orig_col, _mm256_set1_epi32(0xFF));
         __m256i g_i = _mm256_and_si256(_mm256_srli_epi32(orig_col, 8), _mm256_set1_epi32(0xFF));
         __m256i b_i = _mm256_and_si256(_mm256_srli_epi32(orig_col, 16), _mm256_set1_epi32(0xFF));
@@ -383,7 +383,7 @@ EXPORT void vmath_process_triangles(
         // 11. Masked Store Output
         // ONLY write colors for triangles that survived!
         _mm256_maskstore_epi32((int*)&shaded_color[i], v_survive, final_col);
-        
+
         // Output boolean valid flags
         for(int j=0; j<8; j++) {
             tri_valid[i+j] = (survive_mask & (1 << j)) != 0;
@@ -607,130 +607,233 @@ EXPORT void vmath_swarm_generate_quads(
     }
 }
 EXPORT void vmath_swarm_update_velocities(
-    int count,
-    float* px, float* py, float* pz,
+    int count, float* px, float* py, float* pz,
     float* vx, float* vy, float* vz,
-    float minX, float maxX,
-    float minY, float maxY,
-    float minZ, float maxZ,
+    float minX, float maxX, float minY, float maxY, float minZ, float maxZ,
     float dt, float gravity
 ) {
-    for (int i = 0; i < count; i++) {
-        // Apply Gravity & Slight Drag (Terminal Velocity protection)
-        vy[i] -= gravity * dt;
-        vx[i] *= 0.995f;
-        vy[i] *= 0.995f;
-        vz[i] *= 0.995f;
+    __m256 v_minX = _mm256_set1_ps(minX), v_maxX = _mm256_set1_ps(maxX);
+    __m256 v_minY = _mm256_set1_ps(minY), v_maxY = _mm256_set1_ps(maxY);
+    __m256 v_minZ = _mm256_set1_ps(minZ), v_maxZ = _mm256_set1_ps(maxZ);
+    __m256 v_dt = _mm256_set1_ps(dt);
+    __m256 v_grav = _mm256_set1_ps(gravity * dt);
+    __m256 v_drag = _mm256_set1_ps(0.995f);
+    __m256 v_rest = _mm256_set1_ps(0.8f);
+    __m256 v_neg_rest = _mm256_set1_ps(-0.8f);
+    __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)); // For absolute value
+
+    for (int i = 0; i <= count - 8; i += 8) {
+        __m256 v_vx = _mm256_loadu_ps(&vx[i]);
+        __m256 v_vy = _mm256_loadu_ps(&vy[i]);
+        __m256 v_vz = _mm256_loadu_ps(&vz[i]);
+        __m256 v_px = _mm256_loadu_ps(&px[i]);
+        __m256 v_py = _mm256_loadu_ps(&py[i]);
+        __m256 v_pz = _mm256_loadu_ps(&pz[i]);
+
+        // Apply Gravity & Drag
+        v_vy = _mm256_sub_ps(v_vy, v_grav);
+        v_vx = _mm256_mul_ps(v_vx, v_drag);
+        v_vy = _mm256_mul_ps(v_vy, v_drag);
+        v_vz = _mm256_mul_ps(v_vz, v_drag);
 
         // Integrate Position
-        px[i] += vx[i] * dt;
-        py[i] += vy[i] * dt;
-        pz[i] += vz[i] * dt;
+        v_px = _mm256_fmadd_ps(v_vx, v_dt, v_px);
+        v_py = _mm256_fmadd_ps(v_vy, v_dt, v_py);
+        v_pz = _mm256_fmadd_ps(v_vz, v_dt, v_pz);
 
-        // Universe Cage Bounce Logic (80% Restitution)
-        if (px[i] < minX) { px[i] = minX; vx[i] = fabsf(vx[i]) * 0.8f; }
-        if (px[i] > maxX) { px[i] = maxX; vx[i] = -fabsf(vx[i]) * 0.8f; }
+        // --- X BOUNCE ---
+        __m256 mask_minX = _mm256_cmp_ps(v_px, v_minX, _CMP_LT_OQ);
+        __m256 mask_maxX = _mm256_cmp_ps(v_px, v_maxX, _CMP_GT_OQ);
+        __m256 abs_vx = _mm256_and_ps(v_vx, sign_mask);
+        v_px = _mm256_blendv_ps(v_px, v_minX, mask_minX);
+        v_vx = _mm256_blendv_ps(v_vx, _mm256_mul_ps(abs_vx, v_rest), mask_minX);
+        v_px = _mm256_blendv_ps(v_px, v_maxX, mask_maxX);
+        v_vx = _mm256_blendv_ps(v_vx, _mm256_mul_ps(abs_vx, v_neg_rest), mask_maxX);
 
-        if (py[i] < minY) { py[i] = minY; vy[i] = fabsf(vy[i]) * 0.8f; }
-        if (py[i] > maxY) { py[i] = maxY; vy[i] = -fabsf(vy[i]) * 0.8f; }
+        // --- Y BOUNCE ---
+        __m256 mask_minY = _mm256_cmp_ps(v_py, v_minY, _CMP_LT_OQ);
+        __m256 mask_maxY = _mm256_cmp_ps(v_py, v_maxY, _CMP_GT_OQ);
+        __m256 abs_vy = _mm256_and_ps(v_vy, sign_mask);
+        v_py = _mm256_blendv_ps(v_py, v_minY, mask_minY);
+        v_vy = _mm256_blendv_ps(v_vy, _mm256_mul_ps(abs_vy, v_rest), mask_minY);
+        v_py = _mm256_blendv_ps(v_py, v_maxY, mask_maxY);
+        v_vy = _mm256_blendv_ps(v_vy, _mm256_mul_ps(abs_vy, v_neg_rest), mask_maxY);
 
-        if (pz[i] < minZ) { pz[i] = minZ; vz[i] = fabsf(vz[i]) * 0.8f; }
-        if (pz[i] > maxZ) { pz[i] = maxZ; vz[i] = -fabsf(vz[i]) * 0.8f; }
+        // --- Z BOUNCE ---
+        __m256 mask_minZ = _mm256_cmp_ps(v_pz, v_minZ, _CMP_LT_OQ);
+        __m256 mask_maxZ = _mm256_cmp_ps(v_pz, v_maxZ, _CMP_GT_OQ);
+        __m256 abs_vz = _mm256_and_ps(v_vz, sign_mask);
+        v_pz = _mm256_blendv_ps(v_pz, v_minZ, mask_minZ);
+        v_vz = _mm256_blendv_ps(v_vz, _mm256_mul_ps(abs_vz, v_rest), mask_minZ);
+        v_pz = _mm256_blendv_ps(v_pz, v_maxZ, mask_maxZ);
+        v_vz = _mm256_blendv_ps(v_vz, _mm256_mul_ps(abs_vz, v_neg_rest), mask_maxZ);
+
+        _mm256_storeu_ps(&px[i], v_px); _mm256_storeu_ps(&py[i], v_py); _mm256_storeu_ps(&pz[i], v_pz);
+        _mm256_storeu_ps(&vx[i], v_vx); _mm256_storeu_ps(&vy[i], v_vy); _mm256_storeu_ps(&vz[i], v_vz);
     }
 }
 
 EXPORT void vmath_swarm_apply_explosion(
-    int count,
-    float* px, float* py, float* pz,
+    int count, float* px, float* py, float* pz,
     float* vx, float* vy, float* vz,
-    float ex, float ey, float ez,
-    float force, float radius
+    float ex, float ey, float ez, float force, float radius
 ) {
-    float r2 = radius * radius;
-    for (int i = 0; i < count; i++) {
-        float dx = px[i] - ex;
-        float dy = py[i] - ey;
-        float dz = pz[i] - ez;
-        float dist2 = dx*dx + dy*dy + dz*dz;
+    __m256 v_ex = _mm256_set1_ps(ex), v_ey = _mm256_set1_ps(ey), v_ez = _mm256_set1_ps(ez);
+    __m256 v_r2 = _mm256_set1_ps(radius * radius);
+    __m256 v_1 = _mm256_set1_ps(1.0f);
+    __m256 v_force = _mm256_set1_ps(force);
+    __m256 v_inv_radius = _mm256_set1_ps(1.0f / radius);
 
-        if (dist2 < r2 && dist2 > 1.0f) {
-            float dist = sqrtf(dist2);
-            float f = force * (1.0f - (dist / radius)); // Linear falloff
-            vx[i] += (dx / dist) * f;
-            vy[i] += (dy / dist) * f;
-            vz[i] += (dz / dist) * f;
+    for (int i = 0; i <= count - 8; i += 8) {
+        __m256 dx = _mm256_sub_ps(_mm256_loadu_ps(&px[i]), v_ex);
+        __m256 dy = _mm256_sub_ps(_mm256_loadu_ps(&py[i]), v_ey);
+        __m256 dz = _mm256_sub_ps(_mm256_loadu_ps(&pz[i]), v_ez);
+
+        __m256 dist2 = _mm256_fmadd_ps(dz, dz, _mm256_fmadd_ps(dy, dy, _mm256_mul_ps(dx, dx)));
+
+        // Mask: 1.0f < dist2 < r2
+        __m256 mask = _mm256_and_ps(_mm256_cmp_ps(dist2, v_r2, _CMP_LT_OQ), _mm256_cmp_ps(dist2, v_1, _CMP_GT_OQ));
+
+        if (!_mm256_testz_ps(mask, mask)) {
+            __m256 inv_dist = _mm256_rsqrt_ps(dist2); // Fast hardware inverse square root
+            __m256 dist = _mm256_mul_ps(dist2, inv_dist);
+
+            // f = force * (1.0f - dist * inv_radius)
+            __m256 f = _mm256_mul_ps(v_force, _mm256_sub_ps(v_1, _mm256_mul_ps(dist, v_inv_radius)));
+            __m256 f_inv_dist = _mm256_mul_ps(f, inv_dist); // (f / dist)
+
+            __m256 v_vx = _mm256_loadu_ps(&vx[i]);
+            __m256 v_vy = _mm256_loadu_ps(&vy[i]);
+            __m256 v_vz = _mm256_loadu_ps(&vz[i]);
+
+            v_vx = _mm256_blendv_ps(v_vx, _mm256_fmadd_ps(dx, f_inv_dist, v_vx), mask);
+            v_vy = _mm256_blendv_ps(v_vy, _mm256_fmadd_ps(dy, f_inv_dist, v_vy), mask);
+            v_vz = _mm256_blendv_ps(v_vz, _mm256_fmadd_ps(dz, f_inv_dist, v_vz), mask);
+
+            _mm256_storeu_ps(&vx[i], v_vx);
+            _mm256_storeu_ps(&vy[i], v_vy);
+            _mm256_storeu_ps(&vz[i], v_vz);
         }
     }
 }
 
-EXPORT void vmath_swarm_apply_attractors(
-    int count,
-    float* px, float* py, float* pz,
-    float* vx, float* vy, float* vz,
-    float* seed, // A precalculated 0.0 to 1.0 float for each particle
-    float cx, float cy, float cz, // Center of the room
-    float time, float dt,
-    int shape_mode
+// Boilerplate Spring Physics Macro to keep the shape functions perfectly clean
+#define APPLY_SPRING_PHYSICS() \
+    __m256 v_px = _mm256_loadu_ps(&px[i]), v_py = _mm256_loadu_ps(&py[i]), v_pz = _mm256_loadu_ps(&pz[i]); \
+    __m256 v_vx = _mm256_loadu_ps(&vx[i]), v_vy = _mm256_loadu_ps(&vy[i]), v_vz = _mm256_loadu_ps(&vz[i]); \
+    v_vx = _mm256_mul_ps(_mm256_fmadd_ps(_mm256_sub_ps(v_tx, v_px), v_k, v_vx), v_damp); \
+    v_vy = _mm256_mul_ps(_mm256_fmadd_ps(_mm256_sub_ps(v_ty, v_py), v_k, v_vy), v_damp); \
+    v_vz = _mm256_mul_ps(_mm256_fmadd_ps(_mm256_sub_ps(v_tz, v_pz), v_k, v_vz), v_damp); \
+    _mm256_storeu_ps(&px[i], _mm256_fmadd_ps(v_vx, v_dt, v_px)); \
+    _mm256_storeu_ps(&py[i], _mm256_fmadd_ps(v_vy, v_dt, v_py)); \
+    _mm256_storeu_ps(&pz[i], _mm256_fmadd_ps(v_vz, v_dt, v_pz)); \
+    _mm256_storeu_ps(&vx[i], v_vx); _mm256_storeu_ps(&vy[i], v_vy); _mm256_storeu_ps(&vz[i], v_vz);
+
+
+EXPORT void vmath_swarm_bundle(
+    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed, 
+    float cx, float cy, float cz, float time, float dt
 ) {
-    for (int i = 0; i < count; i++) {
-        float s = seed[i];
-        float tx = cx, ty = cy, tz = cz;
+    __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
+    __m256 v_r = _mm256_set1_ps(2000.0f + 400.0f * sinf(time * 6.0f));
+    __m256 v_golden = _mm256_set1_ps(2.39996323f);
+    __m256 v_1 = _mm256_set1_ps(1.0f), v_2 = _mm256_set1_ps(2.0f);
+    __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
 
-        if (shape_mode == 1) {
-            // 1. THE BUNDLE (Fibonacci Sphere - Perfect mathematical distribution)
-            float phi = (float)i * 2.39996323f; // Golden Angle
-            float theta = acosf(1.0f - 2.0f * s);
-            float r = 2000.0f + 400.0f * sinf(time * 6.0f); // Breathing core
-            tx = cx + r * sinf(theta) * cosf(phi);
-            ty = cy + r * cosf(theta);
-            tz = cz + r * sinf(theta) * sinf(phi);
+    for (int i = 0; i <= count - 8; i += 8) {
+        __m256 v_s = _mm256_loadu_ps(&seed[i]);
+        __m256 v_i = _mm256_set_ps(i+7, i+6, i+5, i+4, i+3, i+2, i+1, i);
+        
+        __m256 v_phi = _mm256_mul_ps(v_i, v_golden);
+        
+        // Math Hack: No acos needed! cos(theta) = 1-2s. sin(theta) = 2*sqrt(s*(1-s))
+        __m256 v_cos_theta = _mm256_fnmadd_ps(v_2, v_s, v_1); 
+        __m256 v_sin_theta = _mm256_mul_ps(v_2, _mm256_sqrt_ps(_mm256_mul_ps(v_s, _mm256_sub_ps(v_1, v_s))));
+        
+        __m256 v_tx = _mm256_fmadd_ps(v_r, _mm256_mul_ps(v_sin_theta, fast_cos_avx(v_phi)), v_cx);
+        __m256 v_ty = _mm256_fmadd_ps(v_r, v_cos_theta, v_cy);
+        __m256 v_tz = _mm256_fmadd_ps(v_r, _mm256_mul_ps(v_sin_theta, fast_sin_avx(v_phi)), v_cz);
 
-        } else if (shape_mode == 2) {
-            // 2. THE GALAXY (A massive spinning wavy disc)
-            float angle = s * 3.14159f * 30.0f + time * 1.5f;
-            float r = 1000.0f + s * 14000.0f; // Spiral outwards
-            tx = cx + r * cosf(angle);
-            ty = cy + 800.0f * sinf(s * 40.0f - time * 3.0f); // Wavy Z-axis flutter
-            tz = cz + r * sinf(angle);
+        APPLY_SPRING_PHYSICS();
+    }
+}
 
-        } else if (shape_mode == 3) {
-            // 3. THE TORNADO (Double Helix ascending)
-            float height = s * 24000.0f - 12000.0f; // Bottom to top
-            float angle = s * 3.14159f * 30.0f - time * 4.0f;
-            float r = 2000.0f + (s * 4000.0f); // Gets wider at the top
-            tx = cx + r * cosf(angle);
-            ty = cy + height;
-            tz = cz + r * sinf(angle);
+EXPORT void vmath_swarm_galaxy(
+    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed, 
+    float cx, float cy, float cz, float time, float dt
+) {
+    __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
+    __m256 v_time_ang = _mm256_set1_ps(time * 1.5f), v_time_z = _mm256_set1_ps(time * 3.0f);
+    __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
 
-        } else if (shape_mode == 4) {
-            // 4. THE GYROSCOPE (3 Interlocking Rotating Rings)
-            int ring = i % 3; // Divide particles into 3 groups
-            float angle = s * 3.14159f * 2.0f + time * 2.5f;
-            float r = 7000.0f;
-            if (ring == 0) { tx = cx + r*cosf(angle); ty = cy + r*sinf(angle); tz = cz; }
-            else if (ring == 1) { tx = cx + r*cosf(angle); ty = cy; tz = cz + r*sinf(angle); }
-            else { tx = cx; ty = cy + r*cosf(angle); tz = cz + r*sinf(angle); }
-        }
+    for (int i = 0; i <= count - 8; i += 8) {
+        __m256 v_s = _mm256_loadu_ps(&seed[i]);
+        __m256 v_angle = _mm256_fmadd_ps(v_s, _mm256_set1_ps(3.14159f * 30.0f), v_time_ang);
+        __m256 v_r = _mm256_fmadd_ps(v_s, _mm256_set1_ps(14000.0f), _mm256_set1_ps(1000.0f));
 
-        // SPRING PHYSICS (Steering towards target)
-        float dx = tx - px[i];
-        float dy = ty - py[i];
-        float dz = tz - pz[i];
+        __m256 v_tx = _mm256_fmadd_ps(v_r, fast_cos_avx(v_angle), v_cx);
+        __m256 v_ty = _mm256_fmadd_ps(_mm256_set1_ps(800.0f), fast_sin_avx(_mm256_fnmadd_ps(v_time_z, _mm256_set1_ps(1.0f), _mm256_mul_ps(v_s, _mm256_set1_ps(40.0f)))), v_cy);
+        __m256 v_tz = _mm256_fmadd_ps(v_r, fast_sin_avx(v_angle), v_cz);
 
-        float k = 4.0f; // Spring stiffness (Higher = snaps faster)
-        vx[i] += dx * k * dt;
-        vy[i] += dy * k * dt;
-        vz[i] += dz * k * dt;
+        APPLY_SPRING_PHYSICS();
+    }
+}
 
-        // DAMPING (Friction so they settle into the shape instead of orbiting forever)
-        vx[i] *= 0.92f;
-        vy[i] *= 0.92f;
-        vz[i] *= 0.92f;
+EXPORT void vmath_swarm_tornado(
+    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed, 
+    float cx, float cy, float cz, float time, float dt
+) {
+    __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
+    __m256 v_time_ang = _mm256_set1_ps(time * 4.0f);
+    __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
 
-        // INTEGRATE
-        px[i] += vx[i] * dt;
-        py[i] += vy[i] * dt;
-        pz[i] += vz[i] * dt;
+    for (int i = 0; i <= count - 8; i += 8) {
+        __m256 v_s = _mm256_loadu_ps(&seed[i]);
+        __m256 v_height = _mm256_fnmadd_ps(_mm256_set1_ps(-24000.0f), v_s, _mm256_set1_ps(-12000.0f));
+        __m256 v_angle = _mm256_fnmadd_ps(v_time_ang, _mm256_set1_ps(1.0f), _mm256_mul_ps(v_s, _mm256_set1_ps(3.14159f * 30.0f)));
+        __m256 v_r = _mm256_fmadd_ps(v_s, _mm256_set1_ps(4000.0f), _mm256_set1_ps(2000.0f));
+
+        __m256 v_tx = _mm256_fmadd_ps(v_r, fast_cos_avx(v_angle), v_cx);
+        __m256 v_ty = _mm256_add_ps(v_cy, v_height);
+        __m256 v_tz = _mm256_fmadd_ps(v_r, fast_sin_avx(v_angle), v_cz);
+
+        APPLY_SPRING_PHYSICS();
+    }
+}
+
+EXPORT void vmath_swarm_gyroscope(
+    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed,
+    float cx, float cy, float cz, float time, float dt
+) {
+    __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
+    __m256 v_r = _mm256_set1_ps(7000.0f);
+    __m256 v_time_ang = _mm256_set1_ps(time * 2.5f);
+    __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
+
+    for (int i = 0; i <= count - 8; i += 8) {
+        __m256 v_s = _mm256_loadu_ps(&seed[i]);
+        __m256 v_angle = _mm256_fmadd_ps(v_s, _mm256_set1_ps(3.14159f * 2.0f), v_time_ang);
+
+        __m256 v_cos = fast_cos_avx(v_angle);
+        __m256 v_sin = fast_sin_avx(v_angle);
+
+        // Calculate all 3 ring positions simultaneously!
+        __m256 r0_x = _mm256_fmadd_ps(v_r, v_cos, v_cx), r0_y = _mm256_fmadd_ps(v_r, v_sin, v_cy), r0_z = v_cz;
+        __m256 r1_x = r0_x, r1_y = v_cy, r1_z = _mm256_fmadd_ps(v_r, v_sin, v_cz);
+        __m256 r2_x = v_cx, r2_y = _mm256_fmadd_ps(v_r, v_cos, v_cy), r2_z = r1_z;
+
+        // Masking logic based on (i % 3)
+        int rings[8] = { (i)%3, (i+1)%3, (i+2)%3, (i+3)%3, (i+4)%3, (i+5)%3, (i+6)%3, (i+7)%3 };
+        __m256i v_ring = _mm256_loadu_si256((__m256i*)rings);
+
+        __m256 m0 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(v_ring, _mm256_setzero_si256()));
+        __m256 m1 = _mm256_castsi256_ps(_mm256_cmpeq_epi32(v_ring, _mm256_set1_epi32(1)));
+
+        __m256 v_tx = _mm256_blendv_ps(r2_x, _mm256_blendv_ps(r1_x, r0_x, m0), _mm256_or_ps(m0, m1));
+        __m256 v_ty = _mm256_blendv_ps(r2_y, _mm256_blendv_ps(r1_y, r0_y, m0), _mm256_or_ps(m0, m1));
+        __m256 v_tz = _mm256_blendv_ps(r2_z, _mm256_blendv_ps(r1_z, r0_z, m0), _mm256_or_ps(m0, m1));
+
+        APPLY_SPRING_PHYSICS();
     }
 }
 
@@ -990,7 +1093,7 @@ EXPORT void vmath_generate_basic_sphere(float* lx, float* ly, float* lz, int lat
     }
 }
 
-// THE COMMAND QUEUE DISPATCHER (The single, branchless entry point for Lua)
+// THE COMMAND QUEUE DISPATCHER (100% Branchless)
 EXPORT void vmath_execute_queue(
     int* queue, int command_count,
     CameraState* cam, RenderMemory* mem,
@@ -1014,37 +1117,49 @@ EXPORT void vmath_execute_queue(
                 vmath_swarm_update_velocities(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, -15000, 15000, -4000, 15000, -15000, 15000, dt, -8000.0f * mem->Swarm_GravityBlend);
                 break;
 
-            case 3: // SWARM_APPLY_ATTRACTORS (States 1-4)
-                vmath_swarm_apply_attractors(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_State);
+            case 3: // SWARM_BUNDLE (State 1)
+                vmath_swarm_bundle(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt);
                 break;
 
-            case 4: // SWARM_APPLY_METAL (State 5)
+            case 4: // SWARM_GALAXY (State 2)
+                vmath_swarm_galaxy(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                break;
+
+            case 5: // SWARM_TORNADO (State 3)
+                vmath_swarm_tornado(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                break;
+
+            case 6: // SWARM_GYROSCOPE (State 4)
+                vmath_swarm_gyroscope(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                break;
+
+            case 7: // SWARM_METAL (State 5)
                 vmath_swarm_metal(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
                 break;
 
-            case 5: // SWARM_APPLY_PARADOX (State 6)
+            case 8: // SWARM_PARADOX (State 6)
                 vmath_swarm_smales(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
                 break;
 
-            case 6: // SWARM_GEN_QUADS (Generates vertices into Object ID 0)
+            case 9: // SWARM_GEN_QUADS
                 vmath_swarm_generate_quads(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f);
                 break;
 
-            case 7: // SPHERE_TICK (Generates vertices into Object ID 1)
+            case 10: // SPHERE_TICK
                 vmath_generate_basic_sphere(mem->Vert_LX + mem->Obj_VertStart[1], mem->Vert_LY + mem->Obj_VertStart[1], mem->Vert_LZ + mem->Obj_VertStart[1], 100, 100, 3500.0f);
                 break;
 
-            case 8: { // RENDER_CULL (Takes exactly ONE argument: the Object ID)
-                int id = queue[++i]; // Increment pointer to read the argument, then advance loop
+            case 11: { // RENDER_CULL
+                int id = queue[++i];
                 vmath_render_batch(id, id, cam, HALF_W, HALF_H, sun_x, sun_y, sun_z, mem, ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H);
                 break;
             }
 
-            case 9: // SWARM_EXPLOSION_PUSH
+            case 12: // SWARM_EXPLOSION_PUSH
                 vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, 5000000.0f * dt, 15000.0f);
                 break;
 
-            case 10: // SWARM_EXPLOSION_PULL
+            case 13: // SWARM_EXPLOSION_PULL
                 vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, -4000000.0f * dt, 20000.0f);
                 break;
         }

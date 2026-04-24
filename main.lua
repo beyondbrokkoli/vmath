@@ -12,16 +12,18 @@ local global_time = 0
 local CMD = {
     CLEAR = 1,
     SWARM_APPLY_BASE_PHYSICS = 2,
-    SWARM_APPLY_ATTRACTORS = 3,
-    SWARM_APPLY_METAL = 4,
-    SWARM_APPLY_PARADOX = 5,
-    SWARM_GEN_QUADS = 6,
-    SPHERE_TICK = 7,
-    RENDER_CULL = 8,
-    SWARM_EXPLOSION_PUSH = 9,   -- NEW
-    SWARM_EXPLOSION_PULL = 10   -- NEW
+    SWARM_BUNDLE = 3,
+    SWARM_GALAXY = 4,
+    SWARM_TORNADO = 5,
+    SWARM_GYROSCOPE = 6,
+    SWARM_METAL = 7,
+    SWARM_PARADOX = 8,
+    SWARM_GEN_QUADS = 9,
+    SPHERE_TICK = 10,
+    RENDER_CULL = 11,
+    SWARM_EXPLOSION_PUSH = 12,
+    SWARM_EXPLOSION_PULL = 13
 }
-
 function love.load()
     CANVAS_W, CANVAS_H = love.graphics.getPixelDimensions()
     MainCamera.fov = (CANVAS_W / 800) * 600
@@ -34,7 +36,7 @@ function love.load()
     Sequence.LoadModule("camera", MainCamera)
     Sequence.LoadModule("swarm")
     Sequence.RunPhase("Init")
-    
+
     -- SPHERE TEMPORARILY DISABLED FOR TESTING
     -- local id, _ = Memory.ClaimObjects(1) ...
 end
@@ -66,14 +68,13 @@ function love.draw()
 
     -- 4. TARGET SHAPE KERNEL (Only queue the one we need)
     local state = mem.Swarm_State
-    if state >= 1 and state <= 4 then
-        q[q_len] = CMD.SWARM_APPLY_ATTRACTORS; q_len = q_len + 1
-    elseif state == 5 then
-        q[q_len] = CMD.SWARM_APPLY_METAL; q_len = q_len + 1
-    elseif state == 6 then
-        q[q_len] = CMD.SWARM_APPLY_PARADOX; q_len = q_len + 1
+    if state == 1 then q[q_len] = CMD.SWARM_BUNDLE; q_len = q_len + 1
+    elseif state == 2 then q[q_len] = CMD.SWARM_GALAXY; q_len = q_len + 1
+    elseif state == 3 then q[q_len] = CMD.SWARM_TORNADO; q_len = q_len + 1
+    elseif state == 4 then q[q_len] = CMD.SWARM_GYROSCOPE; q_len = q_len + 1
+    elseif state == 5 then q[q_len] = CMD.SWARM_METAL; q_len = q_len + 1
+    elseif state == 6 then q[q_len] = CMD.SWARM_PARADOX; q_len = q_len + 1
     end
-
     -- 5. GENERATE GEOMETRY
     q[q_len] = CMD.SWARM_GEN_QUADS; q_len = q_len + 1
 
