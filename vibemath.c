@@ -792,8 +792,6 @@ EXPORT void vmath_swarm_smales(
 }
 // ========================================================================
 // RENDER BATCH HELPERS
-// Note: When you paste the bodies below, change the internal function calls
-// to match our new vmath_ prefixes! (e.g. simd_project_vertices -> vmath_project_vertices)
 // ========================================================================
 
 EXPORT void vmath_render_batch(
@@ -857,7 +855,7 @@ EXPORT void vmath_render_batch(
 }
 
 // ========================================================================
-// FULLY NEW CODE FOR THE TESTBED
+// TESTBED
 // ========================================================================
 
 // A dead-simple scalar sphere. No noise, no SIMD, purely a stable target for our Transition Weaving tests.
