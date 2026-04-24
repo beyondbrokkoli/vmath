@@ -246,76 +246,189 @@ EXPORT void vmath_project_vertices(
 
 EXPORT void vmath_process_triangles(
     int tCount,
-    // Indices & Validity
     int* v1, int* v2, int* v3, bool* vert_valid,
-    // Coordinates
     float* px, float* py, float* pz,
     float* lx, float* ly, float* lz,
-    // Colors & Outputs
     uint32_t* baked_color, uint32_t* shaded_color, bool* tri_valid,
-    // Object Rotation Matrix
     float rx, float ry, float rz,
     float ux, float uy, float uz,
     float fx, float fy, float fz,
-    // Sun Vector
     float sun_x, float sun_y, float sun_z
 ) {
-    for (int i = 0; i < tCount; i++) {
-        int i1 = v1[i];
-        int i2 = v2[i];
-        int i3 = v3[i];
+    // --- PRE-LOAD UNIFORMS ---
+    __m256 v_sun_x = _mm256_set1_ps(sun_x);
+    __m256 v_sun_y = _mm256_set1_ps(sun_y);
+    __m256 v_sun_z = _mm256_set1_ps(sun_z);
+    
+    __m256 v_rx = _mm256_set1_ps(rx), v_ry = _mm256_set1_ps(ry), v_rz = _mm256_set1_ps(rz);
+    __m256 v_ux = _mm256_set1_ps(ux), v_uy = _mm256_set1_ps(uy), v_uz = _mm256_set1_ps(uz);
+    __m256 v_fx = _mm256_set1_ps(fx), v_fy = _mm256_set1_ps(fy), v_fz = _mm256_set1_ps(fz);
+    
+    __m256 v_0_2 = _mm256_set1_ps(0.2f);
+    __m256 v_1_0 = _mm256_set1_ps(1.0f);
+    __m256i v_alpha_mask = _mm256_set1_epi32(0xFF000000);
 
-        // 1. Frustum/Vertex Culling
+    int i = 0;
+
+    // ========================================================
+    // 8-WIDE AVX2 GATHER PIPELINE
+    // ========================================================
+    for (; i <= tCount - 8; i += 8) {
+        // 1. Gather 8 Triangle Indices
+        __m256i vi1 = _mm256_loadu_si256((__m256i*)&v1[i]);
+        __m256i vi2 = _mm256_loadu_si256((__m256i*)&v2[i]);
+        __m256i vi3 = _mm256_loadu_si256((__m256i*)&v3[i]);
+
+        // 2. Vertex Validity Check (Build 32-bit vector mask safely)
+        int valids[8];
+        for(int j=0; j<8; j++) {
+            valids[j] = (vert_valid[v1[i+j]] && vert_valid[v2[i+j]] && vert_valid[v3[i+j]]) ? -1 : 0;
+        }
+        __m256i v_vert_valid = _mm256_loadu_si256((__m256i*)valids);
+
+        // If NO vertices are valid in this batch of 8, skip entirely
+        if (_mm256_testz_si256(v_vert_valid, v_vert_valid)) {
+            for(int j=0; j<8; j++) tri_valid[i+j] = false;
+            continue;
+        }
+
+        // 3. Gather 2D Screen Coords (The Magic Instruction)
+        __m256 px1 = _mm256_i32gather_ps(px, vi1, 4);
+        __m256 py1 = _mm256_i32gather_ps(py, vi1, 4);
+        __m256 px2 = _mm256_i32gather_ps(px, vi2, 4);
+        __m256 py2 = _mm256_i32gather_ps(py, vi2, 4);
+        __m256 px3 = _mm256_i32gather_ps(px, vi3, 4);
+        __m256 py3 = _mm256_i32gather_ps(py, vi3, 4);
+
+        // 4. Backface Culling (Cross Product < 0)
+        __m256 dx1 = _mm256_sub_ps(px2, px1);
+        __m256 dy1 = _mm256_sub_ps(py2, py1);
+        __m256 dx2 = _mm256_sub_ps(px3, px1);
+        __m256 dy2 = _mm256_sub_ps(py3, py1);
+        __m256 cross = _mm256_sub_ps(_mm256_mul_ps(dx1, dy2), _mm256_mul_ps(dy1, dx2));
+
+        __m256 cross_mask = _mm256_cmp_ps(cross, _mm256_setzero_ps(), _CMP_LT_OQ);
+        __m256i v_survive = _mm256_and_si256(v_vert_valid, _mm256_castps_si256(cross_mask));
+
+        // Create an 8-bit mask of surviving triangles
+        int survive_mask = _mm256_movemask_ps(_mm256_castsi256_ps(v_survive));
+
+        // If ALL 8 triangles are facing backward, SKIP LIGHTING!
+        if (survive_mask == 0) {
+            for(int j=0; j<8; j++) tri_valid[i+j] = false;
+            continue;
+        }
+
+        // 5. Gather Local 3D Coords for survivors
+        __m256 lx1 = _mm256_i32gather_ps(lx, vi1, 4);
+        __m256 ly1 = _mm256_i32gather_ps(ly, vi1, 4);
+        __m256 lz1 = _mm256_i32gather_ps(lz, vi1, 4);
+        __m256 lx2 = _mm256_i32gather_ps(lx, vi2, 4);
+        __m256 ly2 = _mm256_i32gather_ps(ly, vi2, 4);
+        __m256 lz2 = _mm256_i32gather_ps(lz, vi2, 4);
+        __m256 lx3 = _mm256_i32gather_ps(lx, vi3, 4);
+        __m256 ly3 = _mm256_i32gather_ps(ly, vi3, 4);
+        __m256 lz3 = _mm256_i32gather_ps(lz, vi3, 4);
+
+        // 6. Calculate Local Normal
+        __m256 ax = _mm256_sub_ps(lx2, lx1);
+        __m256 ay = _mm256_sub_ps(ly2, ly1);
+        __m256 az = _mm256_sub_ps(lz2, lz1);
+        __m256 bx = _mm256_sub_ps(lx3, lx1);
+        __m256 by = _mm256_sub_ps(ly3, ly1);
+        __m256 bz = _mm256_sub_ps(lz3, lz1);
+
+        __m256 lnx = _mm256_sub_ps(_mm256_mul_ps(ay, bz), _mm256_mul_ps(az, by));
+        __m256 lny = _mm256_sub_ps(_mm256_mul_ps(az, bx), _mm256_mul_ps(ax, bz));
+        __m256 lnz = _mm256_sub_ps(_mm256_mul_ps(ax, by), _mm256_mul_ps(ay, bx));
+
+        // 7. Transform to World Normal
+        __m256 wnx = _mm256_fmadd_ps(lnz, v_fx, _mm256_fmadd_ps(lny, v_ux, _mm256_mul_ps(lnx, v_rx)));
+        __m256 wny = _mm256_fmadd_ps(lnz, v_fy, _mm256_fmadd_ps(lny, v_uy, _mm256_mul_ps(lnx, v_ry)));
+        __m256 wnz = _mm256_fmadd_ps(lnz, v_fz, _mm256_fmadd_ps(lny, v_uz, _mm256_mul_ps(lnx, v_rz)));
+
+        // 8. FAST INVERSE SQUARE ROOT
+        __m256 len_sq = _mm256_fmadd_ps(wnz, wnz, _mm256_fmadd_ps(wny, wny, _mm256_mul_ps(wnx, wnx)));
+        len_sq = _mm256_max_ps(len_sq, _mm256_set1_ps(0.000001f)); // Prevent Inf
+        __m256 inv_len = _mm256_rsqrt_ps(len_sq);
+        
+        wnx = _mm256_mul_ps(wnx, inv_len);
+        wny = _mm256_mul_ps(wny, inv_len);
+        wnz = _mm256_mul_ps(wnz, inv_len);
+
+        // 9. Lambertian Lighting (Dot Product)
+        __m256 dot = _mm256_fmadd_ps(wnz, v_sun_z, _mm256_fmadd_ps(wny, v_sun_y, _mm256_mul_ps(wnx, v_sun_x)));
+        __m256 light = _mm256_max_ps(v_0_2, _mm256_min_ps(dot, v_1_0)); // Clamp 0.2 -> 1.0
+
+        // 10. Color Decompression & Multiplication
+        __m256i orig_col = _mm256_loadu_si256((__m256i*)&baked_color[i]);
+        
+        __m256i r_i = _mm256_and_si256(orig_col, _mm256_set1_epi32(0xFF));
+        __m256i g_i = _mm256_and_si256(_mm256_srli_epi32(orig_col, 8), _mm256_set1_epi32(0xFF));
+        __m256i b_i = _mm256_and_si256(_mm256_srli_epi32(orig_col, 16), _mm256_set1_epi32(0xFF));
+
+        __m256 r_f = _mm256_mul_ps(_mm256_cvtepi32_ps(r_i), light);
+        __m256 g_f = _mm256_mul_ps(_mm256_cvtepi32_ps(g_i), light);
+        __m256 b_f = _mm256_mul_ps(_mm256_cvtepi32_ps(b_i), light);
+
+        r_i = _mm256_cvtps_epi32(r_f);
+        g_i = _mm256_cvtps_epi32(g_f);
+        b_i = _mm256_cvtps_epi32(b_f);
+
+        // Repack into uint32_t ARGB format
+        __m256i final_col = _mm256_or_si256(v_alpha_mask,
+                            _mm256_or_si256(_mm256_slli_epi32(b_i, 16),
+                            _mm256_or_si256(_mm256_slli_epi32(g_i, 8), r_i)));
+
+        // 11. Masked Store Output
+        // ONLY write colors for triangles that survived!
+        _mm256_maskstore_epi32((int*)&shaded_color[i], v_survive, final_col);
+        
+        // Output boolean valid flags
+        for(int j=0; j<8; j++) {
+            tri_valid[i+j] = (survive_mask & (1 << j)) != 0;
+        }
+    }
+
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety)
+    // ========================================================
+    for (; i < tCount; i++) {
+        int i1 = v1[i], i2 = v2[i], i3 = v3[i];
+
         if (!vert_valid[i1] || !vert_valid[i2] || !vert_valid[i3]) {
             tri_valid[i] = false;
             continue;
         }
 
-        // Fetch Screen Coords
         float px1 = px[i1], py1 = py[i1];
         float px2 = px[i2], py2 = py[i2];
         float px3 = px[i3], py3 = py[i3];
 
-        // 2. BACKFACE CULLING (The Magic)
-        // If cross product is >= 0, it's facing away from the camera.
         float cross = (px2 - px1) * (py3 - py1) - (py2 - py1) * (px3 - px1);
-        if (cross >= 0) {
-            tri_valid[i] = false; // Kill the triangle!
-            continue;             // Skip all lighting math!
-        }
+        if (cross >= 0) { tri_valid[i] = false; continue; }
 
         uint32_t orig_col = baked_color[i];
-
-        // 3. Local Edges & Normal
         float ax = lx[i2] - lx[i1], ay = ly[i2] - ly[i1], az = lz[i2] - lz[i1];
         float bx = lx[i3] - lx[i1], by = ly[i3] - ly[i1], bz = lz[i3] - lz[i1];
 
-        float lnx = ay * bz - az * by;
-        float lny = az * bx - ax * bz;
-        float lnz = ax * by - ay * bx;
-
-        // 4. Transform to World Normal
+        float lnx = ay * bz - az * by, lny = az * bx - ax * bz, lnz = ax * by - ay * bx;
         float wnx = lnx * rx + lny * ux + lnz * fx;
         float wny = lnx * ry + lny * uy + lnz * fy;
         float wnz = lnx * rz + lny * uz + lnz * fz;
 
-        // Normalize
         float inv_len = 1.0f / sqrtf(wnx*wnx + wny*wny + wnz*wnz + 0.000001f);
         wnx *= inv_len; wny *= inv_len; wnz *= inv_len;
 
-        // 5. Lambertian Lighting
         float dot = wnx * sun_x + wny * sun_y + wnz * sun_z;
-
-        // Clamp Light (0.2 to 1.0)
         float light = dot < 0.2f ? 0.2f : (dot > 1.0f ? 1.0f : dot);
 
-        // 6. Apply Light to Color
         uint32_t b = (uint32_t)(((orig_col >> 16) & 0xFF) * light);
         uint32_t g = (uint32_t)(((orig_col >> 8) & 0xFF) * light);
         uint32_t r = (uint32_t)((orig_col & 0xFF) * light);
 
         shaded_color[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
-        tri_valid[i] = true; // Triangle survives!
+        tri_valid[i] = true;
     }
 }
 
