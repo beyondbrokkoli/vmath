@@ -587,23 +587,84 @@ EXPORT void vmath_rasterize_triangles(
 // ========================================================================
 
 EXPORT void vmath_swarm_generate_quads(
-    int count,
-    float* px, float* py, float* pz,
-    float* lx, float* ly, float* lz,
-    float size
+    int count, float* px, float* py, float* pz,
+    float* lx, float* ly, float* lz, float size,
+    CameraState* cam, float HALF_W, float HALF_H
 ) {
-    int v_idx = 0;
-    for(int i = 0; i < count; i++) {
-        float cx = px[i], cy = py[i], cz = pz[i];
+    __m256 v_cpx = _mm256_set1_ps(cam->x), v_cpy = _mm256_set1_ps(cam->y), v_cpz = _mm256_set1_ps(cam->z);
+    __m256 v_cfwx = _mm256_set1_ps(cam->fwx), v_cfwy = _mm256_set1_ps(cam->fwy), v_cfwz = _mm256_set1_ps(cam->fwz);
+    __m256 v_crtx = _mm256_set1_ps(cam->rtx), v_crty = _mm256_set1_ps(cam->rty), v_crtz = _mm256_set1_ps(cam->rtz);
+    __m256 v_cupx = _mm256_set1_ps(cam->upx), v_cupy = _mm256_set1_ps(cam->upy), v_cupz = _mm256_set1_ps(cam->upz);
+    __m256 v_fov = _mm256_set1_ps(cam->fov);
+    __m256 v_half_w = _mm256_set1_ps(HALF_W), v_half_h = _mm256_set1_ps(HALF_H);
+    __m256 v_size = _mm256_set1_ps(size);
+    __m256 v_0_1 = _mm256_set1_ps(0.1f);
+    __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+    
+    // The "Ghost" Coordinate: Exactly 1000 units behind the camera lens
+    float dead_x = cam->x - cam->fwx * 1000.0f;
+    float dead_y = cam->y - cam->fwy * 1000.0f;
+    float dead_z = cam->z - cam->fwz * 1000.0f;
 
-        // V0: Top Point
-        lx[v_idx] = cx; ly[v_idx] = cy + size; lz[v_idx] = cz; v_idx++;
-        // V1: Bottom Left Front
-        lx[v_idx] = cx - size; ly[v_idx] = cy - size; lz[v_idx] = cz + size; v_idx++;
-        // V2: Bottom Right Front
-        lx[v_idx] = cx + size; ly[v_idx] = cy - size; lz[v_idx] = cz + size; v_idx++;
-        // V3: Bottom Back
-        lx[v_idx] = cx; ly[v_idx] = cy - size; lz[v_idx] = cz - size; v_idx++;
+    int v_idx = 0;
+    for (int i = 0; i <= count - 8; i += 8) {
+        __m256 v_px = _mm256_loadu_ps(&px[i]);
+        __m256 v_py = _mm256_loadu_ps(&py[i]);
+        __m256 v_pz = _mm256_loadu_ps(&pz[i]);
+
+        // 1. Vector from Camera to Particle
+        __m256 dx = _mm256_sub_ps(v_px, v_cpx);
+        __m256 dy = _mm256_sub_ps(v_py, v_cpy);
+        __m256 dz = _mm256_sub_ps(v_pz, v_cpz);
+
+        // 2. Project into Camera Space
+        __m256 cz = _mm256_fmadd_ps(dz, v_cfwz, _mm256_fmadd_ps(dy, v_cfwy, _mm256_mul_ps(dx, v_cfwx)));
+        __m256 depth = _mm256_max_ps(v_0_1, cz); // Prevent division by zero
+
+        __m256 cx = _mm256_fmadd_ps(dz, v_crtz, _mm256_fmadd_ps(dy, v_crty, _mm256_mul_ps(dx, v_crtx)));
+        __m256 cy = _mm256_fmadd_ps(dz, v_cupz, _mm256_fmadd_ps(dy, v_cupy, _mm256_mul_ps(dx, v_cupx)));
+
+        // 3. Calculate Frustum Bounds at this depth
+        __m256 frustum_w = _mm256_add_ps(_mm256_div_ps(_mm256_mul_ps(v_half_w, depth), v_fov), v_size);
+        __m256 frustum_h = _mm256_add_ps(_mm256_div_ps(_mm256_mul_ps(v_half_h, depth), v_fov), v_size);
+
+        __m256 abs_cx = _mm256_and_ps(cx, sign_mask);
+        __m256 abs_cy = _mm256_and_ps(cy, sign_mask);
+
+        // 4. Visibility Masks
+        __m256 mask_z = _mm256_cmp_ps(_mm256_add_ps(cz, v_size), v_0_1, _CMP_GE_OQ);
+        __m256 mask_x = _mm256_cmp_ps(abs_cx, frustum_w, _CMP_LE_OQ);
+        __m256 mask_y = _mm256_cmp_ps(abs_cy, frustum_h, _CMP_LE_OQ);
+
+        // Combine masks and extract as an 8-bit integer
+        __m256 v_visible = _mm256_and_ps(mask_z, _mm256_and_ps(mask_x, mask_y));
+        int visible_mask = _mm256_movemask_ps(v_visible);
+
+        // FAST PATH: If all 8 particles are off-screen, dump 32 ghost vertices instantly
+        if (visible_mask == 0) {
+            for (int j = 0; j < 32; j++) {
+                lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+            }
+            continue;
+        }
+
+        // MIXED PATH: Evaluate which ones survive
+        for (int j = 0; j < 8; j++) {
+            if (visible_mask & (1 << j)) {
+                // SURVIVOR: Build the actual tetrahedron
+                float p_x = px[i+j], p_y = py[i+j], p_z = pz[i+j];
+                lx[v_idx] = p_x; ly[v_idx] = p_y + size; lz[v_idx] = p_z; v_idx++;
+                lx[v_idx] = p_x - size; ly[v_idx] = p_y - size; lz[v_idx] = p_z + size; v_idx++;
+                lx[v_idx] = p_x + size; ly[v_idx] = p_y - size; lz[v_idx] = p_z + size; v_idx++;
+                lx[v_idx] = p_x; ly[v_idx] = p_y - size; lz[v_idx] = p_z - size; v_idx++;
+            } else {
+                // CASUALTY: Teleport behind camera
+                lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+                lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+                lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+                lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+            }
+        }
     }
 }
 EXPORT void vmath_swarm_update_velocities(
@@ -731,7 +792,7 @@ EXPORT void vmath_swarm_apply_explosion(
 
 
 EXPORT void vmath_swarm_bundle(
-    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed, 
+    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed,
     float cx, float cy, float cz, float time, float dt
 ) {
     __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
@@ -743,13 +804,13 @@ EXPORT void vmath_swarm_bundle(
     for (int i = 0; i <= count - 8; i += 8) {
         __m256 v_s = _mm256_loadu_ps(&seed[i]);
         __m256 v_i = _mm256_set_ps(i+7, i+6, i+5, i+4, i+3, i+2, i+1, i);
-        
+
         __m256 v_phi = _mm256_mul_ps(v_i, v_golden);
-        
+
         // Math Hack: No acos needed! cos(theta) = 1-2s. sin(theta) = 2*sqrt(s*(1-s))
-        __m256 v_cos_theta = _mm256_fnmadd_ps(v_2, v_s, v_1); 
+        __m256 v_cos_theta = _mm256_fnmadd_ps(v_2, v_s, v_1);
         __m256 v_sin_theta = _mm256_mul_ps(v_2, _mm256_sqrt_ps(_mm256_mul_ps(v_s, _mm256_sub_ps(v_1, v_s))));
-        
+
         __m256 v_tx = _mm256_fmadd_ps(v_r, _mm256_mul_ps(v_sin_theta, fast_cos_avx(v_phi)), v_cx);
         __m256 v_ty = _mm256_fmadd_ps(v_r, v_cos_theta, v_cy);
         __m256 v_tz = _mm256_fmadd_ps(v_r, _mm256_mul_ps(v_sin_theta, fast_sin_avx(v_phi)), v_cz);
@@ -780,7 +841,7 @@ EXPORT void vmath_swarm_galaxy(
 }
 
 EXPORT void vmath_swarm_tornado(
-    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed, 
+    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed,
     float cx, float cy, float cz, float time, float dt
 ) {
     __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
@@ -1142,7 +1203,7 @@ EXPORT void vmath_execute_queue(
                 break;
 
             case 9: // SWARM_GEN_QUADS
-                vmath_swarm_generate_quads(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f);
+                vmath_swarm_generate_quads(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f, cam, HALF_W, HALF_H);
                 break;
 
             case 10: // SPHERE_TICK
