@@ -138,6 +138,8 @@ ffi.cdef[[
         float *Swarm_Seed;
         int Swarm_State;
         float Swarm_GravityBlend;
+        float Swarm_MetalBlend;
+        float Swarm_ParadoxBlend;
         bool Swarm_Explode1;
         bool Swarm_Explode2;
     } RenderMemory;

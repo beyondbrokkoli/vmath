@@ -10,18 +10,23 @@ return function()
 
     function Swarm.Init()
         local A = Memory.Arrays
-        
+
+        -- [THE FIX] Formally claim the memory so the Sphere doesn't overwrite us!
+        local swarm_obj_id, _ = Memory.ClaimObjects(1) 
+        local vStart, tStart = Memory.ClaimGeometry(PCOUNT * 4, PCOUNT * 4)
+
         -- Setup Object ID 0 Base Data
-        A.Obj_X[0], A.Obj_Y[0], A.Obj_Z[0] = 0, 0, 0
-        A.Obj_Radius[0] = 999999
-        A.Obj_FWX[0], A.Obj_FWY[0], A.Obj_FWZ[0] = 0, 0, 1
-        A.Obj_RTX[0], A.Obj_RTY[0], A.Obj_RTZ[0] = 1, 0, 0
-        A.Obj_UPX[0], A.Obj_UPY[0], A.Obj_UPZ[0] = 0, 1, 0
-        
-        A.Obj_VertStart[0] = 0
-        A.Obj_VertCount[0] = PCOUNT * 4
-        A.Obj_TriStart[0] = 0
-        A.Obj_TriCount[0] = PCOUNT * 4
+        local id = swarm_obj_id
+        A.Obj_X[id], A.Obj_Y[id], A.Obj_Z[id] = 0, 0, 0
+        A.Obj_Radius[id] = 999999
+        A.Obj_FWX[id], A.Obj_FWY[id], A.Obj_FWZ[id] = 0, 0, 1
+        A.Obj_RTX[id], A.Obj_RTY[id], A.Obj_RTZ[id] = 1, 0, 0
+        A.Obj_UPX[id], A.Obj_UPY[id], A.Obj_UPZ[id] = 0, 1, 0
+
+        A.Obj_VertStart[id] = vStart
+        A.Obj_VertCount[id] = PCOUNT * 4
+        A.Obj_TriStart[id] = tStart
+        A.Obj_TriCount[id] = PCOUNT * 4
 
         -- Initialize Particles
         for i = 0, PCOUNT - 1 do
@@ -34,18 +39,19 @@ return function()
             A.Swarm_Seed[i] = i / (PCOUNT - 1)
         end
 
-        local tIdx = 0
+        local tIdx = tStart
         local col1 = bit.bor(0xFF000000, bit.lshift(255, 16), 0, 0)
         local col2 = bit.bor(0xFF000000, 0, bit.lshift(255, 8), 0)
         local col3 = bit.bor(0xFF000000, 0, 0, 255)
         local col4 = bit.bor(0xFF000000, 0, bit.lshift(255, 8), 255)
 
         for i = 0, PCOUNT - 1 do
-            local base = i * 4
-            A.Tri_V1[tIdx], A.Tri_V2[tIdx], A.Tri_V3[tIdx] = base+0, base+1, base+2; A.Tri_BakedColor[tIdx] = col1; tIdx = tIdx + 1
-            A.Tri_V1[tIdx], A.Tri_V2[tIdx], A.Tri_V3[tIdx] = base+0, base+2, base+3; A.Tri_BakedColor[tIdx] = col2; tIdx = tIdx + 1
-            A.Tri_V1[tIdx], A.Tri_V2[tIdx], A.Tri_V3[tIdx] = base+0, base+3, base+1; A.Tri_BakedColor[tIdx] = col3; tIdx = tIdx + 1
-            A.Tri_V1[tIdx], A.Tri_V2[tIdx], A.Tri_V3[tIdx] = base+1, base+3, base+2; A.Tri_BakedColor[tIdx] = col4; tIdx = tIdx + 1
+            -- [THE FIX] Offset the vertex indices by vStart!
+            local base = vStart + (i * 4) 
+            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+1; A.Tri_V3[tIdx] = base+2; A.Tri_BakedColor[tIdx] = col1; tIdx = tIdx + 1
+            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+2; A.Tri_V3[tIdx] = base+3; A.Tri_BakedColor[tIdx] = col2; tIdx = tIdx + 1
+            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+3; A.Tri_V3[tIdx] = base+1; A.Tri_BakedColor[tIdx] = col3; tIdx = tIdx + 1
+            A.Tri_V1[tIdx] = base+1; A.Tri_V2[tIdx] = base+3; A.Tri_V3[tIdx] = base+2; A.Tri_BakedColor[tIdx] = col4; tIdx = tIdx + 1
         end
     end
 
