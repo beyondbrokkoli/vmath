@@ -9,7 +9,18 @@ local ScreenBuffer, ScreenImage, ScreenPtr
 local ZBuffer
 
 local global_time = 0
-local CMD = { CLEAR = 1, SWARM_TICK = 2, SPHERE_TICK = 3, RENDER_CULL = 4, RENDER_TWOTONE = 5 }
+local CMD = {
+    CLEAR = 1,
+    SWARM_APPLY_BASE_PHYSICS = 2,
+    SWARM_APPLY_ATTRACTORS = 3,
+    SWARM_APPLY_METAL = 4,
+    SWARM_APPLY_PARADOX = 5,
+    SWARM_GEN_QUADS = 6,
+    SPHERE_TICK = 7,
+    RENDER_CULL = 8,
+    SWARM_EXPLOSION_PUSH = 9,   -- NEW
+    SWARM_EXPLOSION_PULL = 10   -- NEW
+}
 
 function love.load()
     CANVAS_W, CANVAS_H = love.graphics.getPixelDimensions()
@@ -37,25 +48,59 @@ end
 function love.draw()
     local q = Memory.Arrays.CommandQueue
     local q_len = 0
+    local mem = Memory.RenderStruct
 
-    q[q_len] = CMD.CLEAR;       q_len = q_len + 1  
-    q[q_len] = CMD.SWARM_TICK;  q_len = q_len + 1  
+    -- 1. CLEAR BUFFERS
+    q[q_len] = CMD.CLEAR; q_len = q_len + 1  
+
+    -- 2. CONDITIONAL EXPLOSIONS (The Logic lives in Lua!)
+    if love.mouse.isDown(1) then
+        q[q_len] = CMD.SWARM_EXPLOSION_PUSH; q_len = q_len + 1
+    end
+    if love.mouse.isDown(2) then
+        q[q_len] = CMD.SWARM_EXPLOSION_PULL; q_len = q_len + 1
+    end
+
+    -- 3. BASE PHYSICS (Always runs)
+    q[q_len] = CMD.SWARM_APPLY_BASE_PHYSICS; q_len = q_len + 1
+
+    -- 4. TARGET SHAPE KERNEL (Only queue the one we need)
+    local state = mem.Swarm_State
+    if state >= 1 and state <= 4 then
+        q[q_len] = CMD.SWARM_APPLY_ATTRACTORS; q_len = q_len + 1
+    elseif state == 5 then
+        q[q_len] = CMD.SWARM_APPLY_METAL; q_len = q_len + 1
+    elseif state == 6 then
+        q[q_len] = CMD.SWARM_APPLY_PARADOX; q_len = q_len + 1
+    end
+
+    -- 5. GENERATE GEOMETRY
+    q[q_len] = CMD.SWARM_GEN_QUADS; q_len = q_len + 1
+
+    -- 6. RENDER THE SWARM
     q[q_len] = CMD.RENDER_CULL; q_len = q_len + 1  
-    q[q_len] = 0;               q_len = q_len + 1 -- Render ID 0 (Swarm)
+    q[q_len] = 0;               q_len = q_len + 1 -- Pass ID 0 as argument
 
+    -- ========================================================
+    -- EXECUTE IN C (Zero logic, 100% throughput)
+    -- ========================================================
+    BENCH.Begin("CommandQueue_Execute")
     VibeMath.vmath_execute_queue(
-        q, q_len, MainCamera, Memory.RenderStruct, 
+        q, q_len, 
+        MainCamera, mem, 
         ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H, 
         global_time, love.timer.getDelta()
     )
+    BENCH.End("CommandQueue_Execute")
 
     ScreenImage:replacePixels(ScreenBuffer)
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.setBlendMode("replace")
     love.graphics.draw(ScreenImage, 0, 0)
+    
     love.graphics.setBlendMode("alpha")
     love.graphics.setColor(0, 1, 0, 1)
-    love.graphics.print("FPS: " .. love.timer.getFPS() .. " | SWARM ISOLATION TEST", 10, 10)
+    love.graphics.print("FPS: " .. love.timer.getFPS() .. " | PURE COMMAND QUEUE", 10, 10)
 end
 
 function love.keypressed(key)
