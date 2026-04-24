@@ -877,6 +877,7 @@ EXPORT void vmath_generate_basic_sphere(float* lx, float* ly, float* lz, int lat
     }
 }
 
+// THE COMMAND QUEUE DISPATCHER (The single, branchless entry point for Lua)
 EXPORT void vmath_execute_queue(
     int* queue, int command_count,
     CameraState* cam, RenderMemory* mem,
@@ -896,36 +897,43 @@ EXPORT void vmath_execute_queue(
                 vmath_clear_buffers(ScreenPtr, ZBuffer, 0xFF000000, 99999.0f, CANVAS_W * CANVAS_H);
                 break;
 
-            case 2:
-                if (mem->Swarm_Explode1) vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, 5000000.0f * dt, 15000.0f);
-                if (mem->Swarm_Explode2) vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, -4000000.0f * dt, 20000.0f);
+            case 2: // SWARM_APPLY_BASE_PHYSICS
+                vmath_swarm_update_velocities(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, -15000, 15000, -4000, 15000, -15000, 15000, dt, -8000.0f * mem->Swarm_GravityBlend);
+                break;
 
-                if (mem->Swarm_GravityBlend > 0.0f) {
-                    vmath_swarm_update_velocities(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, -15000, 15000, -4000, 15000, -15000, 15000, dt, -8000.0f * mem->Swarm_GravityBlend);
-                }
+            case 3: // SWARM_APPLY_ATTRACTORS (States 1-4)
+                vmath_swarm_apply_attractors(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_State);
+                break;
 
-                if (mem->Swarm_GravityBlend < 1.0f && mem->Swarm_State > 0) {
-                    if (mem->Swarm_State >= 1 && mem->Swarm_State <= 4) {
-                        vmath_swarm_apply_attractors(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_State);
-                    } else if (mem->Swarm_State == 5) {
-                        vmath_swarm_metal(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
-                    } else if (mem->Swarm_State == 6) {
-                        vmath_swarm_smales(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
-                    }
-                }
+            case 4: // SWARM_APPLY_METAL (State 5)
+                vmath_swarm_metal(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
+                break;
 
+            case 5: // SWARM_APPLY_PARADOX (State 6)
+                vmath_swarm_smales(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
+                break;
+
+            case 6: // SWARM_GEN_QUADS (Generates vertices into Object ID 0)
                 vmath_swarm_generate_quads(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f);
                 break;
 
-            case 3: // CMD_SPHERE_TICK (Generates vertices into Object ID 1)
+            case 7: // SPHERE_TICK (Generates vertices into Object ID 1)
                 vmath_generate_basic_sphere(mem->Vert_LX + mem->Obj_VertStart[1], mem->Vert_LY + mem->Obj_VertStart[1], mem->Vert_LZ + mem->Obj_VertStart[1], 100, 100, 3500.0f);
                 break;
 
-            case 4: { // CMD_RENDER_CULL (Takes an argument!)
-                int id = queue[++i]; // Read the NEXT integer in the queue as the Object ID
+            case 8: { // RENDER_CULL (Takes exactly ONE argument: the Object ID)
+                int id = queue[++i]; // Increment pointer to read the argument, then advance loop
                 vmath_render_batch(id, id, cam, HALF_W, HALF_H, sun_x, sun_y, sun_z, mem, ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H);
                 break;
             }
+
+            case 9: // SWARM_EXPLOSION_PUSH
+                vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, 5000000.0f * dt, 15000.0f);
+                break;
+
+            case 10: // SWARM_EXPLOSION_PULL
+                vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, -4000000.0f * dt, 20000.0f);
+                break;
         }
     }
 }

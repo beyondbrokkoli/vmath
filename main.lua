@@ -3,7 +3,7 @@ local bit = require("bit")
 local VibeMath = require("load")
 local Memory = require("memory")
 local Sequence = require("sequence")
-
+require("bench")
 local CANVAS_W, CANVAS_H
 local ScreenBuffer, ScreenImage, ScreenPtr
 local ZBuffer
