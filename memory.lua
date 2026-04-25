@@ -99,6 +99,9 @@ AllocateSoA("float[?]", 10000, {
 -- 7. The Command Queue (For C-Backend Dispatch)
 AllocateSoA("int[?]", 64, {"CommandQueue"})
 
+AllocateSoA("int[?]", 10000, {"Swarm_Indices", "Swarm_TempIndices"})
+AllocateSoA("float[?]", 10000, {"Swarm_Distances", "Swarm_TempDistances"})
+
 -- ==========================================
 -- [4] GLOBAL SINGLETONS & STRUCTS
 -- ==========================================
@@ -142,6 +145,11 @@ ffi.cdef[[
         float Swarm_ParadoxBlend;
         bool Swarm_Explode1;
         bool Swarm_Explode2;
+
+        int *Swarm_Indices;
+        int *Swarm_TempIndices;
+        float *Swarm_Distances;
+        float *Swarm_TempDistances;
     } RenderMemory;
 
     // THE COMMAND QUEUE (Our one and only entry point)

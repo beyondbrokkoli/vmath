@@ -110,6 +110,11 @@ typedef struct {
     float Swarm_ParadoxBlend;
     bool Swarm_Explode1;
     bool Swarm_Explode2;
+    // --- [NEW] DEPTH SORTING ARRAYS ---
+    int *Swarm_Indices;
+    int *Swarm_TempIndices;
+    float *Swarm_Distances;
+    float *Swarm_TempDistances;
 } RenderMemory;
 
 
@@ -585,11 +590,11 @@ EXPORT void vmath_rasterize_triangles(
 // ========================================================================
 // SWARM PHYSICS (The Particle Baseline)
 // ========================================================================
-
 EXPORT void vmath_swarm_generate_quads(
     int count, float* px, float* py, float* pz,
     float* lx, float* ly, float* lz, float size,
-    CameraState* cam, float HALF_W, float HALF_H
+    CameraState* cam, float HALF_W, float HALF_H,
+    int* indices // <-- NEW PARAMETER
 ) {
     __m256 v_cpx = _mm256_set1_ps(cam->x), v_cpy = _mm256_set1_ps(cam->y), v_cpz = _mm256_set1_ps(cam->z);
     __m256 v_cfwx = _mm256_set1_ps(cam->fwx), v_cfwy = _mm256_set1_ps(cam->fwy), v_cfwz = _mm256_set1_ps(cam->fwz);
@@ -600,7 +605,7 @@ EXPORT void vmath_swarm_generate_quads(
     __m256 v_size = _mm256_set1_ps(size);
     __m256 v_0_1 = _mm256_set1_ps(0.1f);
     __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
-    
+
     // The "Ghost" Coordinate: Exactly 1000 units behind the camera lens
     float dead_x = cam->x - cam->fwx * 1000.0f;
     float dead_y = cam->y - cam->fwy * 1000.0f;
@@ -608,9 +613,14 @@ EXPORT void vmath_swarm_generate_quads(
 
     int v_idx = 0;
     for (int i = 0; i <= count - 8; i += 8) {
-        __m256 v_px = _mm256_loadu_ps(&px[i]);
-        __m256 v_py = _mm256_loadu_ps(&py[i]);
-        __m256 v_pz = _mm256_loadu_ps(&pz[i]);
+
+        // [NEW] Load the 8 sorted indices
+        __m256i v_idx_vec = _mm256_loadu_si256((__m256i*)&indices[i]);
+
+        // [NEW] Gather coordinates front-to-back using the indices
+        __m256 v_px = _mm256_i32gather_ps(px, v_idx_vec, 4);
+        __m256 v_py = _mm256_i32gather_ps(py, v_idx_vec, 4);
+        __m256 v_pz = _mm256_i32gather_ps(pz, v_idx_vec, 4);
 
         // 1. Vector from Camera to Particle
         __m256 dx = _mm256_sub_ps(v_px, v_cpx);
@@ -647,12 +657,13 @@ EXPORT void vmath_swarm_generate_quads(
             }
             continue;
         }
-
         // MIXED PATH: Evaluate which ones survive
         for (int j = 0; j < 8; j++) {
             if (visible_mask & (1 << j)) {
-                // SURVIVOR: Build the actual tetrahedron
-                float p_x = px[i+j], p_y = py[i+j], p_z = pz[i+j];
+                // SURVIVOR: Build the actual tetrahedron using the SORTED INDEX
+                int actual_id = indices[i+j];
+                float p_x = px[actual_id], p_y = py[actual_id], p_z = pz[actual_id];
+
                 lx[v_idx] = p_x; ly[v_idx] = p_y + size; lz[v_idx] = p_z; v_idx++;
                 lx[v_idx] = p_x - size; ly[v_idx] = p_y - size; lz[v_idx] = p_z + size; v_idx++;
                 lx[v_idx] = p_x + size; ly[v_idx] = p_y - size; lz[v_idx] = p_z + size; v_idx++;
@@ -667,6 +678,7 @@ EXPORT void vmath_swarm_generate_quads(
         }
     }
 }
+
 EXPORT void vmath_swarm_update_velocities(
     int count, float* px, float* py, float* pz,
     float* vx, float* vy, float* vz,
@@ -1153,6 +1165,62 @@ EXPORT void vmath_generate_basic_sphere(float* lx, float* ly, float* lz, int lat
         }
     }
 }
+EXPORT void vmath_swarm_sort_depth(
+    int count, float* px, float* py, float* pz,
+    int* indices, int* temp_indices, float* distances, float* temp_distances,
+    float cx, float cy, float cz
+) {
+    // 1. Calculate Squared Distances using AVX2
+    __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
+    for(int i = 0; i <= count - 8; i += 8) {
+        __m256 dx = _mm256_sub_ps(_mm256_loadu_ps(&px[i]), v_cx);
+        __m256 dy = _mm256_sub_ps(_mm256_loadu_ps(&py[i]), v_cy);
+        __m256 dz = _mm256_sub_ps(_mm256_loadu_ps(&pz[i]), v_cz);
+        __m256 dist2 = _mm256_fmadd_ps(dz, dz, _mm256_fmadd_ps(dy, dy, _mm256_mul_ps(dx, dx)));
+        _mm256_storeu_ps(&distances[i], dist2);
+    }
+
+    // Initialize base indices
+    for(int i = 0; i < count; i++) indices[i] = i;
+
+    // 2. The 8-bit Radix Sort (4 passes for 32-bit keys)
+    // IEEE-754 positive floats can be sorted directly by their integer bit representations!
+    int* src_idx = indices;
+    int* dst_idx = temp_indices;
+    float* src_val = distances;
+    float* dst_val = temp_distances;
+
+    for (int shift = 0; shift < 32; shift += 8) {
+        int counts[256] = {0};
+
+        // Count frequencies
+        for (int i = 0; i < count; i++) {
+            uint32_t key = ((uint32_t*)src_val)[i];
+            counts[(key >> shift) & 0xFF]++;
+        }
+
+        // Calculate offsets
+        int offsets[256];
+        offsets[0] = 0;
+        for (int i = 1; i < 256; i++) {
+            offsets[i] = offsets[i - 1] + counts[i - 1];
+        }
+
+        // Scatter
+        for (int i = 0; i < count; i++) {
+            uint32_t key = ((uint32_t*)src_val)[i];
+            int bucket = (key >> shift) & 0xFF;
+            int dest = offsets[bucket]++;
+            dst_val[dest] = src_val[i];
+            dst_idx[dest] = src_idx[i];
+        }
+
+        // Swap buffers
+        int* t_idx = src_idx; src_idx = dst_idx; dst_idx = t_idx;
+        float* t_val = src_val; src_val = dst_val; dst_val = t_val;
+    }
+    // Because we do exactly 4 passes, the pointers swap perfectly back to their original arrays!
+}
 
 // THE COMMAND QUEUE DISPATCHER (100% Branchless)
 EXPORT void vmath_execute_queue(
@@ -1202,8 +1270,8 @@ EXPORT void vmath_execute_queue(
                 vmath_swarm_smales(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
                 break;
 
-            case 9: // SWARM_GEN_QUADS
-                vmath_swarm_generate_quads(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f, cam, HALF_W, HALF_H);
+            case 9: // SWARM_GEN_QUADS (Now passes mem->Swarm_Indices)
+                vmath_swarm_generate_quads(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f, cam, HALF_W, HALF_H, mem->Swarm_Indices);
                 break;
 
             case 10: // SPHERE_TICK
@@ -1222,6 +1290,9 @@ EXPORT void vmath_execute_queue(
 
             case 13: // SWARM_EXPLOSION_PULL
                 vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, -4000000.0f * dt, 20000.0f);
+                break;
+            case 14: // SWARM_SORT_DEPTH
+                vmath_swarm_sort_depth(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_Indices, mem->Swarm_TempIndices, mem->Swarm_Distances, mem->Swarm_TempDistances, cam->x, cam->y, cam->z);
                 break;
         }
     }

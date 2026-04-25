@@ -22,7 +22,8 @@ local CMD = {
     SPHERE_TICK = 10,
     RENDER_CULL = 11,
     SWARM_EXPLOSION_PUSH = 12,
-    SWARM_EXPLOSION_PULL = 13
+    SWARM_EXPLOSION_PULL = 13,
+    SWARM_SORT_DEPTH = 14
 }
 function love.load()
     CANVAS_W, CANVAS_H = love.graphics.getPixelDimensions()
@@ -75,11 +76,13 @@ function love.draw()
     elseif state == 5 then q[q_len] = CMD.SWARM_METAL; q_len = q_len + 1
     elseif state == 6 then q[q_len] = CMD.SWARM_PARADOX; q_len = q_len + 1
     end
-    -- 5. GENERATE GEOMETRY
+    -- 5. SORT FRONT-TO-BACK
+    q[q_len] = CMD.SWARM_SORT_DEPTH; q_len = q_len + 1
+    -- 6. GENERATE GEOMETRY
     q[q_len] = CMD.SWARM_GEN_QUADS; q_len = q_len + 1
 
-    -- 6. RENDER THE SWARM
-    q[q_len] = CMD.RENDER_CULL; q_len = q_len + 1  
+    -- 7. RENDER THE SWARM
+    q[q_len] = CMD.RENDER_CULL; q_len = q_len + 1
     q[q_len] = 0;               q_len = q_len + 1 -- Pass ID 0 as argument
 
     -- ========================================================
@@ -87,9 +90,9 @@ function love.draw()
     -- ========================================================
     BENCH.Begin("CommandQueue_Execute")
     VibeMath.vmath_execute_queue(
-        q, q_len, 
-        MainCamera, mem, 
-        ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H, 
+        q, q_len,
+        MainCamera, mem,
+        ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H,
         global_time, love.timer.getDelta()
     )
     BENCH.End("CommandQueue_Execute")
@@ -98,7 +101,7 @@ function love.draw()
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.setBlendMode("replace")
     love.graphics.draw(ScreenImage, 0, 0)
-    
+
     love.graphics.setBlendMode("alpha")
     love.graphics.setColor(0, 1, 0, 1)
     love.graphics.print("FPS: " .. love.timer.getFPS() .. " | PURE COMMAND QUEUE", 10, 10)
